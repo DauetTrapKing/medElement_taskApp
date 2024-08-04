@@ -1,0 +1,42 @@
+<!-- appointments/templates/appointments/appointments.html -->
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Appointments</title>
+</head>
+<body>
+    <h1>Appointments</h1>
+    <table border="1">
+        <tr>
+            <th>Name</th>
+            <th>Last Name</th>
+            <th>Middle Name</th>
+            <th>Birthday</th>
+            <th>Gender</th>
+            <th>Phone</th>
+        </tr>
+        {% for appointment in appointments %}
+        <tr>
+            <td>{{ appointment.NAME }}</td>
+            <td>{{ appointment.LASTNAME }}</td>
+            <td>{{ appointment.MIDDLENAME }}</td>
+            <td>{{ appointment.BIRTHDAY }}</td>
+            <td>{{ appointment.GENDER }}</td>
+            <td>
+                {% if appointment.PATIENT_PHONE_2 %}
+                    {{ appointment.PATIENT_PHONE_1 }}<br>
+                    {% for phone in appointment.PATIENT_PHONE_2 %}
+                        {{ phone }}<br>
+                    {% endfor %}
+                    {{ appointment.PATIENT_PHONE_3 }}<br>
+                    {{ appointment.PATIENT_PHONE_4 }}
+                {% else %}
+                    {{ appointment.PATIENT_PHONE }}
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>
