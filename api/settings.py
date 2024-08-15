@@ -12,7 +12,9 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from celery.schedules import crontab
 from pathlib import Path
-
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -28,7 +30,13 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
 
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+USERNAME  = os.getenv('username')
+PASSWORD = os.getenv('password')
 # Application definition
 
 INSTALLED_APPS = [
@@ -56,12 +64,17 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 
 CELERY_BEAT_SCHEDULE = {
-    "test-request-task": {
-        "task": "appointments.tasks.test_request_task",
-        "schedule": crontab(minute=0, hour="*/2"),  # ебашим тут время
-        "options": {
-            "timezone": "Asia/Almaty",
-        },
+    # "test-request-task": {
+    #     "task": "appointments.tasks.test_request_task",
+    #     "schedule": crontab(minute=0, hour="*/2"),  # ебашим тут время
+    #     "options": {
+    #         "timezone": "Asia/Almaty",
+    #     },
+    # },
+    "update-status-and-fetch-audio-every-12-hours": {
+        "task": "appointments.tasks.update_status_and_fetch_audio",
+        "schedule": crontab(minute=0, hour="*/12"),  # Каждые 12 часов
+        "options": {"run_immediately": True},
     },
 }
 CELERYD_CONCURRENCY = 1

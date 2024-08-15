@@ -2,16 +2,18 @@ import logging
 import json
 import openai
 import requests
+import os
 import redis
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
-from .models import AnalysisResult
+# from .models import AnalysisResult
+from .models import Review
 
 
 logger = logging.getLogger(__name__)
-openai.api_key = "sk-proj-sRoFBbkQhLHMZmYrCXduT3BlbkFJKz801QoLGLa6SDibzQ1J"
+openai.api_key = os.getenv("OPENAI_API_KEY")
 redis_client = redis.StrictRedis(
     host="localhost", port=6379, db=0, decode_responses=True
 )
@@ -19,13 +21,23 @@ redis_client = redis.StrictRedis(
 
 @csrf_exempt
 def save_comment_to_redis(reception_code, comment):
-    redis_client.rpush(reception_code, comment)
-    redis_client.expire(reception_code, 600)  # Устанавливаем время жизни ключа в 10 минут
+    try:
+        redis_client.rpush(reception_code, comment)
+        redis_client.expire(reception_code, 600)  # Устанавливаем время жизни ключа в 10 минут
+        logger.debug(f"Saved comment for {reception_code}: {comment}")
+    except Exception as e:
+        logger.error(f"Error saving comment to Redis: {e}")
+
 
 def get_comments_from_redis(reception_code):
-    comments = redis_client.lrange(reception_code, 0, -1)
-    redis_client.delete(reception_code)
-    return comments
+    try:
+        comments = redis_client.lrange(reception_code, 0, -1)
+        redis_client.delete(reception_code)
+        logger.debug(f"Retrieved comments for {reception_code}: {comments}")
+        return comments
+    except Exception as e:
+        logger.error(f"Error retrieving comments from Redis: {e}")
+        return []
 
 def analyze_comments(comments):
     combined_comments = " ".join(comments)
@@ -40,7 +52,7 @@ def analyze_comments(comments):
                 "3. Оценка клиники (от 1 до 5). "
                 "4. Отзыв о клинике. "
                 "5. Вернется ли пациент (Да или Нет) . Только так"
-                "Проанализируй следующие комментарии и верни результат в формате JSON без''' такого занака и без двойных ковычек. Вот примеры разговоров и соответствующих анализов:"
+                "Проанализируй следующие комментарии и верни результат в формате JSON без''' такого знака и без двойных ковычек. Вот примеры разговоров и соответствующих анализов:"
             ),
         },
         {
@@ -81,8 +93,6 @@ def analyze_comments(comments):
         },
         {"role": "user", "content": combined_comments},
     ]
-
-    # Отправка комментариев в ChatGPT
     response = openai.chat.completions.create(model="gpt-4o-mini", messages=messages)
 
     gpt_response = response.choices[0].message.content.strip()
@@ -159,18 +169,23 @@ def end_of_speech(request):
 
             analysis = analyze_comments(comments)
 
-            # Сохранение результатов анализа
-            AnalysisResult.objects.update_or_create(
-                reception_code=reception_code,
-                defaults={
-                    "doctor_rating": analysis.get("doctor_rating"),
-                    "doctor_feedback": analysis.get("doctor_feedback"),
-                    "clinic_rating": analysis.get("clinic_rating"),
-                    "clinic_feedback": analysis.get("clinic_feedback"),
-                    "will_return": analysis.get("will_return"),
-                    "analyzed_at": timezone.now(),
-                },
-            )
+            # Проверка существования записи
+            try:
+                review_instance = Review.objects.get(RECEPTION_CODE=reception_code)
+            except Review.DoesNotExist:
+                logger.error(f"Review with RECEPTION_CODE {reception_code} does not exist.")
+                return JsonResponse(
+                    {"error": f"Review with RECEPTION_CODE {reception_code} does not exist."},
+                    status=404
+                )
+
+            # Обновление записи
+            review_instance.doctor_rating = analysis.get("doctor_rating")
+            review_instance.doctor_feedback = analysis.get("doctor_feedback")
+            review_instance.clinic_rating = analysis.get("clinic_rating")
+            review_instance.clinic_feedback = analysis.get("clinic_feedback")
+            review_instance.will_attend = analysis.get("will_return")
+            review_instance.save()
 
             # Отправка анализа в Telegram
             send_to_telegram(analysis)
@@ -190,7 +205,7 @@ def end_of_speech(request):
     return JsonResponse({"error": "Invalid method"}, status=405)
 
 def send_to_telegram(message):
-    bot_token = '7279203867:AAHEwdAd8gmgFOO00t42KtXXf6C-loaVVVk'
+    bot_token = os.getenv('')
     chat_id = '910943180'
     telegram_api_url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
     

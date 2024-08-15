@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from .models import Status, Review
 from django.conf import settings
+from celery.signals import celeryd_after_setup
 
 import requests
 import logging
@@ -14,7 +15,7 @@ import pytz
 import time
 import logging
 import re
-
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,22 @@ REDIS_PORT = 6379
 REDIS_DB = 0
 redis_client = redis.Redis(host="localhost", port=6379, db=0)
 
-username = "e29aed230f8bc79bffeb2c8956463d26"
-password = "62e210d896e67"
+BASE_URL = "https://api.medelement.com"
 
+def load_accounts_from_env():
+    accounts = []
+    i = 1
+    while True:
+        username = os.getenv(f"ACCOUNT_{i}_USERNAME")
+        password = os.getenv(f"ACCOUNT_{i}_PASSWORD")
+        address = os.getenv(f"ACCOUNT_{i}_ADDRESS")
+        if not username or not password or not address:
+            break
+        accounts.append({"username": username, "password": password, "address": address})
+        i += 1
+    return accounts
+
+accounts = load_accounts_from_env()
 
 def basic_auth(username, password):
     base_string = f"{username}:{password}".encode("ascii")
@@ -33,10 +47,7 @@ def basic_auth(username, password):
     return token
 
 
-BASE_URL = "https://api.medelement.com"
-
-
-def get_headers():
+def get_headers(username, password):
     auth_token = basic_auth(username, password)
     return {
         "Authorization": f"Basic {auth_token}",
@@ -48,8 +59,7 @@ def make_url(base_url, endpoint):
     return f"{base_url}{endpoint}"
 
 
-def fetch_json(url, params=None):
-    headers = get_headers()
+def fetch_json(url, headers, params=None):
     encoded_params = urlencode(params)
     try:
         logger.info(
@@ -66,8 +76,20 @@ def fetch_json(url, params=None):
         logger.error(f"Other error occurred: {err}")
         return None
 
-
-def find_appointments():
+address_mapping = {
+        "e29aed230f8bc79bffeb2c8956463d26": "ул. Розыбакиева, д. 37 В, Алматы",
+        "c5b31e4eafd401947e840973278a27ee": "ул. Нусупбекова, д. 26/1, Алматы",
+        "c3785f889ed005dd85ae1f78622424cd": "ул. Манаса, д. 59, Алматы",
+        "a4f426a360fc19e596c500a00d1952fb": "ул. Жандосова, д. 10/55, Алматы",
+        "8774808244e0d716045a7ed7d07faeac": "ул. Куйши Дина, д. 9, Астана",
+        "09a605ca5e93064abd7f20b53ab953ad": "ул. Рашидова, д. 36/15, Шымкент",
+        "7c31eabbb299b2093aa448db5f9b6d18": "микрорайон 18, д. 44, Шымкент",
+        "54b045ca7c31872bab9e5e8b68407283": "микрорайон Аксай 2, д. 44 А, Алматы",
+        "bffada6dd259b83a409bcbb17739d6eb": "ул. Шаляпина, д. 58А, Алматы",
+    }
+def find_appointments(username, password, address):
+    #address = address_mapping.get(username, "Неизвестный адрес")
+    logger.info(f"Using address for username {username}: {address}")
     max_attempts = 5
     attempts = 0
     while attempts < max_attempts:
@@ -78,11 +100,10 @@ def find_appointments():
             today = now.strftime("%d.%m.%Y")
             tomorrow = (now + timedelta(days=1)).strftime("%d.%m.%Y")
 
-            # Получение сохраненного значения skip из Redis
-            redis_skip_key = "appointments_skip"
+            redis_skip_key = f"appointments_skip_{username}"
             skip = int(redis_client.get(redis_skip_key) or 0)
+            skip = max(0, skip - 200)
             logger.info(f"Starting with skip value: {skip}")
-
             url = make_url(BASE_URL, "/v2/doctor/reception/search")
             data = []
             while True:
@@ -91,12 +112,15 @@ def find_appointments():
                     "end_datetime": tomorrow,
                     "skip": skip,
                     "removed": 0,
-                    "active": 0,
-                    "only_ambulator": 0,
                 }
+                
+                logger.info(f"Fetching data with params: {params} and address: {address}")
 
-                json_data = fetch_json(url, params=params)
+                headers = get_headers(username, password)
+                json_data = fetch_json(url, headers, params=params)
+                
                 if not json_data or "receptions" not in json_data:
+                    logger.warning(f"No data found for username: {username}")
                     break
 
                 for reception in json_data["receptions"]:
@@ -104,16 +128,17 @@ def find_appointments():
                         datetime.strptime(reception["STARTTIME"], "%Y-%m-%d %H:%M:%S")
                     )
                     if two_hours_ago <= reception_time <= now:
+                        reception["address"] = address  # Устанавливаем адрес в reception
                         data.append(reception)
 
                 if len(json_data["receptions"]) < 50:
                     break
 
                 skip += 50
-                # Сохранение  значения skip в Redis 24 часа
                 redis_client.set(redis_skip_key, skip, ex=86400)
-                time.sleep(5)
+                time.sleep(1)
 
+            logger.info(f"Found {len(data)} appointments for address: {address}")
             return data
         except Exception as e:
             if "502" in str(e):
@@ -134,8 +159,7 @@ def find_appointments():
     logger.error("Max attempts reached. Terminating the task.")
     return {"error": "Max attempts reached"}
 
-
-def get_doctor_info(patient_code, two_hours_ago, now):
+def get_doctor_info(patient_code, two_hours_ago, now, username, password):
     max_attempts = 5
     attempts = 0
     tz = pytz.timezone("Asia/Qyzylorda")
@@ -156,9 +180,10 @@ def get_doctor_info(patient_code, two_hours_ago, now):
             skip = 0
             recent_receptions = []
             while True:
-                time.sleep(2)
+                time.sleep(1)
                 params["skip"] = skip
-                json_data = fetch_json(url, params=params)
+                headers = get_headers(username, password)
+                json_data = fetch_json(url, headers, params=params)
                 if not json_data or "receptions" not in json_data:
                     break
 
@@ -193,13 +218,13 @@ def get_doctor_info(patient_code, two_hours_ago, now):
     return None
 
 
-def get_patient_info(patient_code):
+def get_patient_info(patient_code, username, password):
     max_attempts = 5
     attempts = 0
     while attempts < max_attempts:
         try:
             url = f"{BASE_URL}/doctor/v1/patient/{patient_code}"
-            response = requests.get(url, headers=get_headers())
+            response = requests.get(url, headers=get_headers(username, password))
             response.raise_for_status()
             patient_data = response.json()
 
@@ -236,30 +261,7 @@ def get_patient_info(patient_code):
     return None
 
 
-def save_appointments_to_redis(appointments):
-    try:
-        now = datetime.now()
-        today_key = now.strftime("%Y-%m-%d")
-
-        for appointment in appointments:
-            appointment_id = appointment["RECEPTION_CODE"]
-            # Проверка уникальности по RECEPTION_CODE
-            if not redis_client.sismember(f"{today_key}:appointments", appointment_id):
-                # Добавление уникального ид
-                redis_client.sadd(f"{today_key}:appointments", appointment_id)
-                # Сохранение данных в отдельный кей
-                redis_client.set(
-                    f"{today_key}:{appointment_id}", json.dumps(appointment)
-                )
-                # Установка времени жизни
-                redis_client.expire(
-                    f"{today_key}:{appointment_id}", timedelta(days=1).seconds
-                )
-    except Exception as e:
-        logger.error(f"Error saving appointments to Redis: {e}")
-
-
-def save_appointments_to_db(detailed_appointments):
+def save_appointments_to_db(detailed_appointments, order_mapping):
     try:
         for appointment in detailed_appointments:
             appointment_info = appointment["appointment"]
@@ -267,55 +269,75 @@ def save_appointments_to_db(detailed_appointments):
             patient_info = appointment["patient_info"]
 
             reception_code = appointment_info.get("RECEPTION_CODE")
+            patient_phone = patient_info.get("PATIENT_PHONE")
+            patient_code = appointment_info.get("PATIENT_CODE")  # Получаем patient_code
+            
             if not reception_code:
                 logger.error(f"Missing 'RECEPTION_CODE' in appointment: {appointment}")
                 continue
 
-            reception_date = datetime.strptime(
-                appointment_info["STARTTIME"], "%Y-%m-%d %H:%M:%S"
-            )
-
-            # Проверка, существует ли запись с таким же RECEPTION_CODE
-            if (
-                Status.objects.filter(RECEPTION_CODE=reception_code).exists()
-                or Review.objects.filter(RECEPTION_CODE=reception_code).exists()
-            ):
-                logger.warning(f"Duplicate RECEPTION_CODE found: {reception_code}")
+            if not patient_phone:
+                logger.warning(f"Missing 'PATIENT_PHONE' in appointment: {appointment}. Skipping...")
                 continue
 
-            # Сохранение данных в таблицу statuses
-            status = Status(
-                number=patient_info.get("PATIENT_PHONE", ""),
-                patient=f"{patient_info.get('NAME', '')} {patient_info.get('LASTNAME', '')} {patient_info.get('MIDDLENAME', '')}",
-                status="Scheduled",
-                RECEPTION_CODE=reception_code,
-                call_date=timezone.now(),
-            )
-            status.save()
-            logger.info(f"Successfully added status to database: {status}")
+            reception_date = datetime.strptime(appointment_info["STARTTIME"], "%Y-%m-%d %H:%M:%S")
 
-            # Сохранение данных в таблицу reviews
-            review = Review(
-                number=patient_info.get("PATIENT_PHONE", ""),
-                patient=f"{patient_info.get('NAME', '')} {patient_info.get('LASTNAME', '')} {patient_info.get('MIDDLENAME', '')}",
-                reception_date=reception_date.date(),
-                reception_time=reception_date.time(),
-                doctor=doctor_info.get("FULLNAME", ""),
-                RECEPTION_CODE=reception_code,
-            )
-            review.save()
-            logger.info(f"Successfully added review to database: {review}")
+            # Получение адреса из appointment
+            address = appointment_info.get("address")
+            # Получение имени доктора
+            doctor_name = doctor_info.get("SPECIALIST_FULLNAME", "Unknown Doctor")
+
+            # Проверка, существует ли запись с таким же RECEPTION_CODE
+            review = Review.objects.filter(RECEPTION_CODE=reception_code).first()
+            if review:
+                logger.warning(f"Duplicate RECEPTION_CODE found: {reception_code}")
+            else:
+                # Создание новой записи в Review
+                review = Review(
+                    number=patient_phone,
+                    patient=f"{patient_info.get('NAME', '')} {patient_info.get('LASTNAME', '')} {patient_info.get('MIDDLENAME', '')}",
+                    reception_date=reception_date.date(),
+                    reception_time=reception_date.time(),
+                    doctor=doctor_name,  # Сохраняем имя доктора в Review
+                    RECEPTION_CODE=reception_code,
+                    address=address,
+                    patient_code=patient_code,  # Сохраняем patient_code в Review
+                )
+                review.save()
+                logger.info(f"Successfully added/updated review in database for address: {address}")
+
+            # Добавление order_key в Status
+            order_key = order_mapping.get(reception_code)
+            if not order_key:
+                logger.warning(f"Missing order_key for RECEPTION_CODE: {reception_code}. Skipping status save...")
+                continue
+
+            status = Status.objects.filter(RECEPTION_CODE=reception_code).first()
+            if not status:
+                status = Status(
+                    number=patient_phone,
+                    patient=f"{patient_info.get('NAME', '')} {patient_info.get('LASTNAME', '')} {patient_info.get('MIDDLENAME', '')}",
+                    status="Scheduled",
+                    RECEPTION_CODE=reception_code,
+                    call_date=timezone.now(),
+                    order_key=order_key,
+                )
+            else:
+                status.order_key = order_key
+            status.save()
+            logger.info(f"Successfully added/updated status in database with order_key: {order_key}")
     except Exception as e:
         logger.error(f"Error saving data to database: {e}")
 
 
 def send_appointments_to_api(detailed_appointments):
-    api_key = "EwtRPRrUGQuv1Mgk.GlJiFsREJQaorDDn0lw63chkmsTu2tHQF0CsIA0DDMMnGS5"
+    api_key = os.getenv("ACS_API_KEY")
     acs_url = (
         f"https://back.crm.acsolutions.ai/api/v2/bpm/public/bp/{api_key}/add_orders"
     )
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     max_attempts = 5
+    order_mapping = {}
 
     def send_batch(batch):
         attempts = 0
@@ -323,7 +345,17 @@ def send_appointments_to_api(detailed_appointments):
             try:
                 response = requests.post(acs_url, headers=headers, json=batch)
                 response.raise_for_status()
-                logger.info(f"Successfully sent batch to API: {batch}")
+                logger.info(f"Successfully sent batch to API: order_key{batch}")
+                response_data = response.json().get("data", {})
+                # Сохраняем соответствие import_id и order_key
+                for key, value in response_data.items():
+                    reception_code = value.get("import_id")
+                    order_key = value.get("order")
+                    if reception_code and order_key:
+                        order_mapping[reception_code] = order_key
+                    else:
+                        logger.warning(f"Missing import_id or order in API response: {value}")
+
                 break  # Exit the retry loop if the request is successful
             except requests.RequestException as e:
                 if response.status_code == 401:
@@ -338,217 +370,129 @@ def send_appointments_to_api(detailed_appointments):
 
     batch = []
     for i, appointment in enumerate(detailed_appointments):
+        phone = appointment["patient_info"].get("PATIENT_PHONE")
+        if not phone:
+            logger.warning(f"No phone number for appointment: {appointment}. Skipping...")
+            continue
+
         data = {
-            "phone": appointment["patient_info"]["PATIENT_PHONE"],
+            "phone": phone,
             "import_id": appointment["appointment"]["RECEPTION_CODE"],
             "full_name": f"{appointment['patient_info']['NAME']} {appointment['patient_info']['LASTNAME']} {appointment['patient_info']['MIDDLENAME']}",
         }
         batch.append(data)
 
-        if (i + 1) % 10 == 0 or (i + 1) == len(detailed_appointments):
+        # Отправляем партию, если набралось 10 элементов или если достигнут конец списка
+        if len(batch) == 10 or (i + 1) == len(detailed_appointments):
             send_batch(batch)
             batch = []
             time.sleep(1)  # Pause for 1 second between batches
 
-
-@shared_task
-def test_request_task():
-    try:
-        tz = pytz.timezone("Asia/Almaty")
-        now = datetime.now(tz)
-        logger.info(f"Task started at (localtime): {now} with timezone: {tz}")
-        two_hours_ago = now - timedelta(hours=2)
-        appointments = find_appointments()
-        if "error" in appointments:
-            return appointments
-
-        detailed_appointments = []
-        for appt in appointments:
-            doctor_info = get_doctor_info(appt["PATIENT_CODE"], two_hours_ago, now)
-            patient_info = get_patient_info(appt["PATIENT_CODE"])
-            if doctor_info and patient_info:
-                detailed_appointments.append(
-                    {
-                        "appointment": appt,
-                        "doctor_info": doctor_info,
-                        "patient_info": {
-                            "NAME": patient_info.get("NAME", ""),
-                            "LASTNAME": patient_info.get("LASTNAME", ""),
-                            "MIDDLENAME": patient_info.get("MIDDLENAME", ""),
-                            "BIRTHDAY": patient_info.get("BIRTHDAY", ""),
-                            "GENDER": patient_info.get("GENDER", ""),
-                            "PATIENT_PHONE": patient_info.get("PATIENT_PHONE", ""),
-                        },
-                    }
-                )
-        logger.info(f"Collected {len(detailed_appointments)} detailed appointments.")
-        logger.info("Task completed. Waiting for the next schedule in 2 hours.")
-        for detailed_appointment in detailed_appointments:
-            logger.info(f"Detailed appointment: {detailed_appointment}")
-
-        save_appointments_to_redis(detailed_appointments)  # Сохранение данных в Redis
-        send_appointments_to_api(detailed_appointments)  # Отправка данных в API
-        save_appointments_to_db(detailed_appointments)  # Сохранение данных в БД
-
-        return detailed_appointments
-    except Exception as e:
-        logger.error(f"Error in test_request_task: {e}")
-        return {"error": str(e)}
+    return order_mapping  # Возвращаем словарь с соответствиями import_id и order_key
 
 
-# def get_recent_appointments(two_hours_ago):
-#     url = make_url(BASE_URL, 'search_with_pd')
-#     params = {
-#         'begin_datetime': two_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ'),
-#         'end_datetime': timezone.now().strftime('%Y-%m-%dT%H:%M:%SZ'),
-#         'skip': 0,
-#         'removed': 0,
-#         'acrive':0,
-#         'limit': 50
-#     }
-#     appointments = []
-#     while True:
-#         data = fetch_json(url, params=params)
-#         if not data:
-#             break
-#         appointments.extend(data)
-#         params['skip'] += 50
-#     return appointments
-# def fetch_json(url, params=None):
-#     try:
-#         response = requests.post(url, headers=get_headers(), params=params)
-#         response.raise_for_status()
-#         return response.json()
-#     except requests.RequestException as e:
-#         logger.error(f"Error fetching JSON data from {url}: {e}")
-#         return {}
+@celeryd_after_setup.connect
+def run_task_on_start(sender, instance, **kwargs):
+    logger.debug("Starting update_status_and_fetch_audio task immediately after worker setup...")
+    update_status_and_fetch_audio.apply_async()
 
 
-# def get_patient_data(patient_code):
-#     url = make_url(BASE_URL, f'v1_patient_get_data?patient_code={patient_code}')
-#     return fetch_json(url)
-
-# def get_doctor_data(specialist_code):
-#     url = make_url(BASE_URL, f'')
-#     return fetch_json(url)
-
-# def send_to_robot_call(patient_data, doctor_data):
-#     url = ''
-#     payload = {
-#         'import_id': patient_data['patient_code'],
-#         'patient_name': patient_data['name'],
-#         'phone_number': patient_data['phone'],
-#         'doctor_name': doctor_data['name'],
-#         'appointment_time': patient_data['appointment_time']
-#     }
-#     data = post_json(url, payload)
-#     return data.get('order_id')
-
-
-# def post_json(url, payload):
-#     try:
-#         response = requests.post(url, headers=get_headers(), json=payload)
-#         response.raise_for_status()
-#         return response.json()
-#     except requests.RequestException as e:
-#         logger.error(f"Error posting JSON data to {url}: {e}")
-#         return {}
-
-# def get_audio_link(order_id):
-#     url = make_url(ACS_BASE_URL, f'get_calls.md?order_id={order_id}')
-#     data = fetch_json(url)
-#     return data.get('audio_link')
-
-
-# def process_with_chatgpt(comments):
-#     try:
-#         response = openai.Completion.create(
-#             engine="davinci",
-#             prompt=f"Пациент сказал: {comments}. Пожалуйста, дайте оценку врача, отзыв о враче, оценку клиники, отзыв о клинике и скажите, придёт ли пациент на следующий приём.",
-#             max_tokens=150
-#         )
-#         data = response.choices[0].text.strip()
-#         return extract_data_from_response(data)
-#     except openai.error.OpenAIError as e:
-#         logger.error(f"Error processing with ChatGPT: {e}")
-#         return {}
-
-# def extract_data_from_response(data):
-#     extracted_data = {}
-#     for line in data.split('\n'):
-#         key, value = map(str.strip, line.split(':', 1))
-#         if 'оценка врача' in key:
-#             extracted_data['doctor_rating'] = int(value)
-#         elif 'отзыв  враче' in key:
-#             extracted_data['doctor_feedback'] = value
-#         elif 'оценка клиники' in key:
-#             extracted_data['clinic_rating'] = int(value)
-#         elif 'отзыв  клинике' in key:
-#             extracted_data['clinic_feedback'] = value
-#         elif 'придёт ли пациент' in key:
-#             extracted_data['will_return'] = value.lower() == 'да'
-#     return extracted_data
-
-# def save_review(order_id, chatgpt_response):
-#     try:
-#         review = Review.objects.get(order_id=order_id)
-#         review.doctor_rating = chatgpt_response.get('doctor_rating')
-#         review.doctor_feedback = chatgpt_response.get('doctor_feedback')
-#         review.clinic_rating = chatgpt_response.get('clinic_rating')
-#         review.clinic_feedback = chatgpt_response.get('clinic_feedback')
-#         review.will_return = chatgpt_response.get('will_return')
-#         review.audio_link = get_audio_link(order_id)
-#         review.save()
-
-#         if review.clinic_rating and review.clinic_rating <= 2:
-#             send_to_telegram(review)
-#     except Review.DoesNotExist as e:
-#         logger.error(f"Review with order_id {order_id} does not exist: {e}")
-#     except Exception as e:
-#         logger.error(f"Error saving review with order_id {order_id}: {e}")
-
-# def send_to_telegram(review):
-#     try:
-#         message = (
-#             f"Плохой отзыв от {review.patient_name}:\n"
-#             f"Дата приёма: {review.appointment_date}\n"
-#             f"Оценка: {review.clinic_rating}\n"
-#             f"Отзыв: {review.clinic_feedback}\n"
-#             f"Врач: {review.doctor_name}\n"
-#             f"Аудиозапись: {review.audio_link}"
-#         )
-#         url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-#         payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
-#         response = requests.post(url, data=payload)
-#         response.raise_for_status()
-#     except requests.RequestException as e:
-#         logger.error(f"Error sending message to Telegram: {e}")
 
 # @shared_task
-# def collect_and_process_feedback():
+# def test_request_task():
 #     try:
-#         now = timezone.now()
-#         two_hours_ago = now - timezone.timedelta(hours=2)
+#         tz = pytz.timezone("Asia/Almaty")
+#         now = datetime.now(tz)
+#         logger.info(f"Task started at (localtime): {now} with timezone: {tz}")
+#         two_hours_ago = now - timedelta(hours=2)
+#         all_detailed_appointments = []
+#         for account in accounts:
+#             username = account["username"]
+#             password = account["password"]
+#             address = account["address"]
 
-#         recent_appointments = get_recent_appointments(two_hours_ago)
+#             appointments = find_appointments(username, password, address)
+#             if "error" in appointments or len(appointments) == 0:
+#                 continue
 
-#         for appointment in recent_appointments:
-#             patient_data = get_patient_data(appointment['patient_code'])
-#             doctor_data = get_doctor_data(appointment['specialist_code'])
-#             order_id = send_to_robot_call(patient_data, doctor_data)
+#             # Ограничиваем количество приемов до одного
+#             appointments = appointments[:1]
+#             detailed_appointments = []
+#             for appt in appointments:
+#                 doctor_info = get_doctor_info(appt["PATIENT_CODE"], two_hours_ago, now, username, password)
+#                 patient_info = get_patient_info(appt["PATIENT_CODE"], username, password)
+#                 if doctor_info and patient_info:
+#                     detailed_appointments.append(
+#                         {
+#                             "appointment": appt,
+#                             "doctor_info": doctor_info,
+#                             "patient_info": {
+#                                 "NAME": patient_info.get("NAME", ""),
+#                                 "LASTNAME": patient_info.get("LASTNAME", ""),
+#                                 "MIDDLENAME": patient_info.get("MIDDLENAME", ""),
+#                                 "BIRTHDAY": patient_info.get("BIRTHDAY", ""),
+#                                 "GENDER": patient_info.get("GENDER", ""),
+#                                 "PATIENT_PHONE": patient_info.get("PATIENT_PHONE", ""),
+#                             },
+#                         }
+#                     )
+#             logger.info(f"Collected {len(detailed_appointments)} detailed appointments for account with address {address}.")
+#             all_detailed_appointments.extend(detailed_appointments)
 
-#             # Сохранение информации о приеме в базе данных
-#             appointment_db = Appointment.objects.create(
-#                 patient_code=appointment['patient_code'],
-#                 specialist_code=appointment['specialist_code'],
-#                 appointment_time=appointment['appointment_time'],
-#                 status='completed',
-#                 order_id=order_id
-#             )
+#         logger.info(f"Total collected {len(all_detailed_appointments)} detailed appointments from all accounts.")
+        
+#         # Отправка данных в API и получение order_mapping
+#         order_mapping = send_appointments_to_api(all_detailed_appointments)
+#         # Сохранение данных в БД с использованием order_mapping
+#         save_appointments_to_db(all_detailed_appointments, order_mapping)
 
-#             # Предполагается, что robot_call посылает комментарии после завершения
-#             comments = "Комментарий от робота обзвона"  # Это нужно будет заменить на реальные комментарии
-#             chatgpt_response = process_with_chatgpt(comments)
-#             save_review(order_id, chatgpt_response)
+#         return all_detailed_appointments
 #     except Exception as e:
-#         logger.error(f"Error in collect_and_process_feedback task: {e}")
+#         logger.error(f"Error in test_request_task: {e}")
+#         return {"error": str(e)}
+    
+@shared_task
+def update_status_and_fetch_audio():
+    try:
+        api_key = os.getenv("ACS_API_KEY")
+        status_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_status"
+        audio_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_calls"
+        # Получаем все записи из таблицы Status
+        all_statuses = Status.objects.all()
+        for status in all_statuses:
+            order_key = status.order_key
+            # Запрос на обновление статуса
+            response = requests.get(status_url, params={"keys": order_key})
+            response_data = response.json()
+            if order_key in response_data:
+                status_info = response_data[order_key].get("status_group_8")
+                if status_info:
+                    print(response_data)
+                    new_status_name = status_info.get("name", status.status)
+                    if status.status == new_status_name:
+                        # Обновляем статус только если он изменился
+                        print(f"Обновление статуса для order_key {order_key}: {new_status_name}")
+                        status.status = new_status_name
+                        status.save()
+                        # Запрос на получение аудиозаписей
+                        audio_response = requests.get(audio_url, params={"keys": order_key})
+                        audio_data = audio_response.json()
+                        print(f"Ответ сервера на аудиозаписи {audio_response.status_code}: {audio_data}")
+
+                        if isinstance(audio_data, list):
+                            for audio_entry in audio_data:
+                                if audio_entry.get("order_key") == order_key:
+                                    audio_link = audio_entry.get("link")
+                                    print(f"Ссылка на аудио: {audio_link}")
+                                    if audio_link:
+                                        status.audio_link = audio_link
+                                        try:
+                                            status.save()
+                                            print(f"Ссылка на аудио успешно сохранена для order_key {order_key}")
+                                        except Exception as e:
+                                            print(f"Ошибка при сохранении ссылки на аудио для order_key {order_key}: {e}")
+                        else:
+                            print(f"audio_data не является списком: {audio_data}")
+
+    except Exception as e:
+        print(f"Error in update_status_and_fetch_audio task: {e}")
