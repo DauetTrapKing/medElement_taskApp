@@ -64,18 +64,22 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 
 CELERY_BEAT_SCHEDULE = {
-    # "test-request-task": {
-    #     "task": "appointments.tasks.test_request_task",
-    #     "schedule": crontab(minute=0, hour="*/2"),  # ебашим тут время
-    #     "options": {
-    #         "timezone": "Asia/Almaty",
-    #     },
-    # },
+    "test-request-task": {
+        "task": "appointments.tasks.test_request_task",
+        "schedule": crontab(minute=0, hour="*/2"),  #Каждые два часа
+        "options": {
+            "timezone": "Asia/Almaty",
+        },
+    },
     "update-status-and-fetch-audio-every-12-hours": {
         "task": "appointments.tasks.update_status_and_fetch_audio",
         "schedule": crontab(minute=0, hour="*/12"),  # Каждые 12 часов
         "options": {"run_immediately": True},
     },
+    "delete_skip_value":{
+        'task': 'appointments.tasks.delete_skip_value',  
+        'schedule': crontab(hour=19, minute=00),  # Выполнение каждый день в 00:00
+    }
 }
 CELERYD_CONCURRENCY = 1
 CELERYD_PREFETCH_MULTIPLIER = 1

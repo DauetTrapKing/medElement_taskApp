@@ -2,8 +2,8 @@ from django.db import models
 from django.utils import timezone
 
 
-class Status(models.Model):
-    number = models.CharField(
+class Statuses(models.Model):
+    phone = models.CharField(
         max_length=255, default="Unknown"
     )  
     patient = models.CharField(
@@ -26,8 +26,8 @@ class Status(models.Model):
         max_length=500, null=True, blank=True
     ) 
 
-class Review(models.Model):
-    number = models.CharField(max_length=255, default="Unknown")
+class Reviews(models.Model):
+    phone = models.CharField(max_length=255, default="Unknown")
     patient = models.CharField(max_length=255, default="Unknown")
     reception_date = models.DateField(default=timezone.now)
     reception_time = models.TimeField(default=timezone.now)
@@ -35,9 +35,7 @@ class Review(models.Model):
     doctor_rating = models.IntegerField(null=True, blank=True)
     doctor_feedback = models.TextField(null=True, blank=True)
     clinic_rating = models.IntegerField(null=True, blank=True)
-    clinic_feedback = models.TextField(null=True, blank=True)
-    will_attend = models.CharField(max_length=10, null=True, blank=True) 
-    audio = models.FileField(upload_to="audios/", null=True, blank=True)
+    clinic_feedback = models.TextField(null=True, blank=True) 
+    audio_link = models.URLField(max_length=500, null=True, blank=True)
     address = models.TextField(null=True, blank=True)
     RECEPTION_CODE = models.CharField(max_length=255, unique=True, default="Unknown", primary_key = True)
-    patient_code = models.CharField(max_length=255, default="Unknown")
