@@ -28,7 +28,11 @@ SECRET_KEY = "django-insecure-o0_5##60p&*(uss*pjhlu$tn9a^%(qd@^9-!^j-zw!qxydw@30
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    '127.0.0.1',
+    'localhost',
+    '7d73-151-236-198-118.ngrok-free.app',
+]
 
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -76,10 +80,6 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(minute=0, hour="*/12"),  # Каждые 12 часов
         "options": {"run_immediately": True},
     },
-    "delete_skip_value":{
-        'task': 'appointments.tasks.delete_skip_value',  
-        'schedule': crontab(hour=19, minute=00),  # Выполнение каждый день в 00:00
-    }
 }
 CELERYD_CONCURRENCY = 1
 CELERYD_PREFETCH_MULTIPLIER = 1

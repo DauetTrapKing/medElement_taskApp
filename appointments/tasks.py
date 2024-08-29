@@ -12,6 +12,8 @@ import logging
 import logging
 import os
 import pytz
+
+
 logger = logging.getLogger(__name__)
 
 redis_client = redis.Redis(host="localhost", port=6379, db=0)
@@ -19,9 +21,9 @@ BASE_URL = "https://api.medelement.com"
 @celeryd_after_setup.connect
 def run_task_on_start(sender, instance, **kwargs):
     logger.debug("Starting tasks immediately after worker setup...")
-    # update_status_and_fetch_audio.apply_async()
-    delete_skip_value.apply_async()
+    update_status_and_fetch_audio.apply_async()
     test_request_task.apply_async()
+
 
 @shared_task
 def test_request_task():
@@ -67,28 +69,15 @@ def test_request_task():
 
         logger.info(f"Total collected {len(all_detailed_appointments)} detailed appointments from all accounts.")
         
-        # Сохранение данных в БД с использованием order_mapping
-        order_mapping = send_appointments_to_api(all_detailed_appointments)
-
-        save_appointments_to_db(all_detailed_appointments, order_mapping)
-        # Отправка данных в API и получение order_mapping
-
+        save_appointments_to_db(all_detailed_appointments)
+        # Планирование задачи по отправке данных в API через 2 часа
+        send_appointments_to_api_task.apply_async(args=[all_detailed_appointments], countdown=2 * 60 * 60)
         return all_detailed_appointments
     except Exception as e:
         logger.error(f"Error in test_request_task: {e}")
         return {"error": str(e)}
 
 
-@shared_task 
-def delete_skip_value():
-    redis_skip_key = 'skip'  # Название ключа в Redis
-    skip_value = int(redis_client.get(redis_skip_key) or 0)
-    
-    if skip_value > 0:
-        redis_client.delete(redis_skip_key)
-        print(f"Значение '{redis_skip_key}' с значением {skip_value} удалено из Redis.")
-    else:
-        print(f"Ключ '{redis_skip_key}' не найден или его значение равно 0.")
 
 @shared_task
 def update_status_and_fetch_audio():
@@ -154,3 +143,15 @@ def update_status_and_fetch_audio():
 
     except Exception as e:
         print(f"Error in update_status_and_fetch_audio task: {e}")
+
+
+@shared_task
+def send_appointments_to_api_task(detailed_appointments):
+    try:
+        order_mapping = send_appointments_to_api(detailed_appointments)
+        print(order_mapping)
+        logger.info("Data successfully sent to API after 2 hours.")
+        return order_mapping
+    except Exception as e:
+        logger.error(f"Error in send_appointments_to_api_task: {e}")
+        return {"error": str(e)}

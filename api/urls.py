@@ -22,6 +22,5 @@ from appointments import views as appointments_view
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("appointments/", include("appointments.urls")),
-    path("receive_comment/", appointments_view.receive_comment, name='receive_comment'),
-    path("end_of_speech/", appointments_view.end_of_speech, name='end_of_speech'),
+    path("proccess_conversation/", appointments_view.process_conversation, name='receive_comment'),
 ]

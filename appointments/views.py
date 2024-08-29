@@ -20,57 +20,30 @@ redis_client = redis.StrictRedis(
 )
 
 @csrf_exempt
-def receive_comment(request):
+def process_conversation(request):
     if request.method == "POST":
         try:
             data = json.loads(request.body)
             logger.debug(f"Received data: {data}")
 
-            reception_code = data.get("RECEPTION_CODE")
-            comment_text = data.get("COMMENT")
+            # Извлечение данных
+            order_key = data.get("order")
+            reception_code = data.get("import")  # Здесь 'import' используется как RECEPTION_CODE
+            conversation_parts = [data.get(str(i)) for i in range(1, 11)]
 
-            if not reception_code or not comment_text:
+            if not order_key or not reception_code or not all(conversation_parts):
                 logger.error(
-                    f"Missing RECEPTION_CODE or comment in request data: {data}"
+                    f"Missing order key, RECEPTION_CODE, or conversation parts in request data: {data}"
                 )
                 return JsonResponse(
-                    {"error": "Missing RECEPTION_CODE or comment"}, status=400
+                    {"error": "Missing order key, RECEPTION_CODE, or conversation parts"}, status=400
                 )
 
-            save_comment_to_redis(reception_code, comment_text)
-            
-            return JsonResponse({"status": "Comment received successfully"}, status=201)
-
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON: {request.body}")
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
-
-    logger.error(f"Invalid request method: {request.method}")
-    return JsonResponse({"error": "Invalid method"}, status=405)
-
-
-@csrf_exempt
-def end_of_speech(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            logger.info(f"Received data: {data}")
-
-            reception_code = data.get("RECEPTION_CODE")
-
-            if not reception_code:
-                logger.error(f"Missing RECEPTION_CODE in request data: {data}")
-                return JsonResponse({"error": "Missing RECEPTION_CODE"}, status=400)
-
-            comments = get_comments_from_redis(reception_code)
-
-            if not comments:
-                logger.error(f"No comments found for RECEPTION_CODE: {reception_code}")
-                return JsonResponse(
-                    {"error": "No comments found for this RECEPTION_CODE"}, status=404
-                )
-
-            analysis = analyze_comments(comments)
+            # Объединение всех частей разговора
+            conversation = " ".join(conversation_parts)
+            print(conversation)
+            # Анализ разговора
+            analysis = analyze_comments(conversation)
 
             # Проверка существования записи и создание новой, если не существует
             review_instance, created = Reviews.objects.get_or_create(
@@ -89,10 +62,11 @@ def end_of_speech(request):
                 review_instance.doctor_feedback = analysis.get("doctor_feedback")
                 review_instance.clinic_rating = analysis.get("clinic_rating")
                 review_instance.clinic_feedback = analysis.get("clinic_feedback")
+                review_instance.order_key = order_key  # обновление order_key в базе данных
                 review_instance.save()
 
-            # Отправка анализа в Telegram
-            send_to_telegram(analysis)
+            # Отправка анализа в Telegram с использованием reception_code
+            send_to_telegram(reception_code)
 
             return JsonResponse(
                 {

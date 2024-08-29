@@ -1,9 +1,8 @@
 from base64 import b64encode
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
-from appointments.models import Reviews, Statuses
-from django.utils import timezone
 from appointments.utils import make_url, get_headers
+from gevent import sleep
 import os
 import requests
 import logging
@@ -20,15 +19,21 @@ redis_client = redis.Redis(host="localhost", port=6379, db=0)
 
 BASE_URL = "https://api.medelement.com"
 def fetch_json(url, headers, params=None):
-    encoded_params = urlencode(params)
     try:
+        encoded_params = urlencode(params) if params else ""
         logger.info(
             f"Fetching JSON from {url} with params: {encoded_params} and headers: {headers}"
         )
         response = requests.post(url, headers=headers, data=encoded_params)
         response.raise_for_status()
         logger.info(f"Response status: {response.status_code}")
-        return response.json()
+        
+        try:
+            json_data = response.json()
+            return json_data
+        except ValueError as ve:
+            logger.error(f"Error decoding JSON: {ve}, response text: {response.text}")
+            return None
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"HTTP error occurred: {http_err}")
         return {"error": "http", "status_code": response.status_code}
@@ -40,17 +45,38 @@ def fetch_json(url, headers, params=None):
 def find_appointments(username, password, address):
     tz = pytz.timezone("Asia/Qyzylorda")
     now = datetime.now(tz)
-    two_hours_ago = now - timedelta(hours=2)
     today = now.strftime("%d.%m.%Y")
     tomorrow = (now + timedelta(days=1)).strftime("%d.%m.%Y")
+    
+    # Формируем ключ для хранения skip значений
+    redis_skip_key = f"appointments_skip_{username}_{today}"
 
-    redis_skip_key = f"appointments_skip_{username}"
-    skip = int(redis_client.get(redis_skip_key) or 0)
-    skip = max(0, skip)
-    skip = 0
-    logger.info(f"Starting with skip value: {skip}")
+    # Проверка существования ключа для текущего дня
+    if not redis_client.exists(redis_skip_key):
+        # Если ключа для текущего дня не существует, обнуляем skip
+        logger.info(f"New day detected. Deleting all previous skip values.")
+        keys = redis_client.keys("appointments_skip_*")
+        for key in keys:
+            redis_client.delete(key)
+            logger.info(f"Successfully deleted skip value for key: {key}")
+
+        # Инициализируем skip как 0 для нового дня
+        skip = 0
+        logger.info(f"Initializing skip value to 0 for {username} on {today}.")
+        
+        # Сохраняем ключ в Redis
+        redis_client.set(redis_skip_key, skip, ex=86400)
+        logger.info(f"Set Redis key: {redis_skip_key} with initial skip value: {skip}")
+    else:
+        # Используем существующее значение skip
+        skip = max(0, int(redis_client.get(redis_skip_key) or 0) - 300)
+        skip = max(0, skip)  # Гарантируем, что skip >= 0
+        logger.info(f"Redis key exists. Starting with skip value: {skip} for date: {today}")
+    
     url = make_url(BASE_URL, "/v2/doctor/reception/search")
     data = []
+    two_hours_ago = now - timedelta(hours=2)
+
     while True:
         params = {
             "begin_datetime": today,
@@ -58,14 +84,17 @@ def find_appointments(username, password, address):
             "skip": skip,
             "removed": 0,
         }
-        
-        logger.info(f"Fetching data with params: {params} and address: {address}")
 
+        logger.info(f"Fetching data with params: {params} and address: {address}")
         headers = get_headers(username, password)
         json_data = fetch_json(url, headers, params=params)
         
-        if not json_data or "receptions" not in json_data:
-            logger.warning(f"No data found for username: {username}")
+        if not json_data:
+            logger.warning(f"No data found for username: {username} or fetch failed.")
+            break
+
+        if "receptions" not in json_data:
+            logger.warning(f"'receptions' key not found in response: {json_data}")
             break
 
         for reception in json_data["receptions"]:
@@ -80,13 +109,12 @@ def find_appointments(username, password, address):
             break
 
         skip += 50
-        redis_client.set(redis_skip_key, skip, ex=86400)
-        time.sleep(1)
+        redis_client.set(redis_skip_key, skip, ex=86400)  # Сохраняем новое значение skip
+        logger.info(f"Updated Redis key: {redis_skip_key} with new skip value: {skip}")
+        sleep(1)
 
     logger.info(f"Found {len(data)} appointments for address: {address}")
     return data
-
-
 def get_doctor_info(patient_code, two_hours_ago, now, username, password):
     max_attempts = 5
     attempts = 0
@@ -108,7 +136,7 @@ def get_doctor_info(patient_code, two_hours_ago, now, username, password):
             skip = 0
             recent_receptions = []
             while True:
-                time.sleep(1)
+                sleep(1)
                 params["skip"] = skip
                 headers = get_headers(username, password)
                 json_data = fetch_json(url, headers, params=params)
@@ -132,13 +160,13 @@ def get_doctor_info(patient_code, two_hours_ago, now, username, password):
                 logger.warning(
                     f"502 error occurred, attempt {attempts}/{max_attempts}. Retrying in 10 seconds..."
                 )
-                time.sleep(10)
+                sleep(10)
             elif "429" in str(e):
                 attempts += 1
                 logger.warning(
                     f"429 error occurred, attempt {attempts}/{max_attempts}. Retrying in 60 seconds..."
                 )
-                time.sleep(60)
+                sleep(60)
             else:
                 logger.error(f"Error in get_doctor_info: {e}")
                 return None
@@ -156,16 +184,9 @@ def get_patient_info(patient_code, username, password):
             response.raise_for_status()
             patient_data = response.json()
 
-            phones = []
-            for i in range(1, 5):
-                phone_key = f"PATIENT_PHONE_{i}"
-                phone = patient_data.get(phone_key)
-                if isinstance(phone, list):
-                    phones.extend(phone)
-                elif phone:
-                    phones.append(phone)
-
-            patient_phone = ", ".join(phones)  # Объединение номеров в строку
+            # Получаем первый номер телефона и очищаем его от нецифровых символов
+            phone = patient_data.get("PATIENT_PHONE_1")
+            patient_phone = "".join(filter(str.isdigit, phone)) if phone else None
 
             # Формируем результативный словарь
             patient_info = {
@@ -185,11 +206,11 @@ def get_patient_info(patient_code, username, password):
             if "429" in str(e):
                 attempts += 1
                 logger.warning(
-                    f"429 error occurred, attempt {attempts}/{max_attempts}. Retrying in 60 seconds..."
+                    f"429 ошибка, попытка {attempts}/{max_attempts}. Повтор через 60 секунд..."
                 )
-                time.sleep(60)
+                sleep(60)
             else:
-                logger.error(f"Error fetching patient info: {e}")
+                logger.error(f"Ошибка при получении информации о пациенте: {e}")
                 return None
-    logger.error("Max attempts reached. Terminating the task.")
+    logger.error("Достигнуто максимальное количество попыток. Завершаем задачу.")
     return None
