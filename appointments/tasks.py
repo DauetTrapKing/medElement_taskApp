@@ -1,13 +1,12 @@
 from celery import shared_task
 from datetime import datetime, timedelta
-from .models import Statuses, Reviews
+from .models import  Reviews
 from celery.signals import celeryd_after_setup
-from .utils import load_accounts_from_env, send_appointments_to_api, make_url
+from .utils import load_accounts_from_env, send_appointments_to_api, process_status_and_audio, send_to_telegram
 from .med_element.get_info import get_doctor_info, get_patient_info, find_appointments
 from .database.save_data import save_appointments_to_db
 
 import redis
-import requests
 import logging
 import logging
 import os
@@ -21,8 +20,8 @@ BASE_URL = "https://api.medelement.com"
 @celeryd_after_setup.connect
 def run_task_on_start(sender, instance, **kwargs):
     logger.debug("Starting tasks immediately after worker setup...")
-    update_status_and_fetch_audio.apply_async()
     test_request_task.apply_async()
+    update_status_and_fetch_audio_task.apply_async()
 
 
 @shared_task
@@ -78,71 +77,17 @@ def test_request_task():
         return {"error": str(e)}
 
 
-
 @shared_task
-def update_status_and_fetch_audio():
+def update_status_and_fetch_audio_task():
     try:
-        api_key = os.getenv("ACS_API_KEY")
-        status_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_status"
-        audio_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_calls"
-        # Получаем все записи из таблицы Status
-        all_statuses = Statuses.objects.all()
-        for status in all_statuses:
-            order_key = status.order_key
-            # Запрос на обновление статуса
-            response = requests.get(status_url, params={"keys": order_key})
-            response_data = response.json()
-
-            # Проверка, что response_data это словарь, а не список
-            if isinstance(response_data, dict) and order_key in response_data:
-                status_info = response_data[order_key].get("status_group_8")
-                if status_info:
-                    print(response_data)
-                    new_status_name = status_info.get("name", status.status)
-                    if status.status != new_status_name:
-                        # Обновляем статус только если он изменился
-                        print(f"Обновление статуса для order_key {order_key}: {new_status_name}")
-                        status.status = new_status_name
-                        status.save()
-                        # Запрос на получение аудиозаписей
-                        audio_response = requests.get(audio_url, params={"keys": order_key})
-                        audio_data = audio_response.json()
-
-                        # Проверка, что audio_data это список
-                        if isinstance(audio_data, list):
-                            for audio_entry in audio_data:
-                                # Проверяем, является ли audio_entry словарем
-                                if isinstance(audio_entry, dict) and audio_entry.get("order_key") == order_key:
-                                    audio_link = audio_entry.get("link")
-                                    print(f"Ссылка на аудио: {audio_link}")
-                                    if audio_link:
-                                        status.audio_link = audio_link
-                                        try:
-                                            status.save()
-                                            print(f"Ссылка на аудио успешно сохранена для order_key {order_key}")
-                                            
-                                            # Сохранение ссылки на аудио в таблице Reviews по RECEPTION_CODE
-                                            try:
-                                                review = Reviews.objects.get(RECEPTION_CODE=status.RECEPTION_CODE)
-                                                review.audio_link = audio_link
-                                                review.save()
-                                                print(f"Ссылка на аудио успешно сохранена в Reviews для RECEPTION_CODE {status.RECEPTION_CODE}")
-                                            except Reviews.DoesNotExist:
-                                                print(f"Запись в Reviews для RECEPTION_CODE {status.RECEPTION_CODE} не найдена")
-                                            except Exception as e:
-                                                print(f"Ошибка при сохранении ссылки на аудио в Reviews для RECEPTION_CODE {status.RECEPTION_CODE}: {e}")
-
-                                        except Exception as e:
-                                            print(f"Ошибка при сохранении ссылки на аудио для order_key {order_key}: {e}")
-                                else:
-                                    print(f"audio_entry не является словарем или не содержит order_key: {audio_entry}")
-                        else:
-                            print(f"audio_data не является списком: {audio_data}")
-            else:
-                print(f"response_data не является словарем или не содержит ключ {order_key}: {response_data}")
+        process_status_and_audio()  # Вызов основной функции
+        logger.info("Статусы и аудио успешно обработаны.")
+        all_reviews = Reviews.objects.filter(doctor_rating__lt=2) | Reviews.objects.filter(clinic_rating__lt=2)
+        for review in all_reviews:
+            send_to_telegram(review.RECEPTION_CODE)
 
     except Exception as e:
-        print(f"Error in update_status_and_fetch_audio task: {e}")
+        logger.error(f"Ошибка в update_status_and_fetch_audio_task: {e}")
 
 
 @shared_task

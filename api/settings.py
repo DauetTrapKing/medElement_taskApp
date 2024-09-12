@@ -75,10 +75,9 @@ CELERY_BEAT_SCHEDULE = {
             "timezone": "Asia/Almaty",
         },
     },
-    "update-status-and-fetch-audio-every-12-hours": {
+    "update-status-and-fetch-audio-every-3-minutes": {
         "task": "appointments.tasks.update_status_and_fetch_audio",
-        "schedule": crontab(minute=0, hour="*/12"),  # Каждые 12 часов
-        "options": {"run_immediately": True},
+        "schedule": crontab(minute="*/6"),  # Каждые 3 минуты
     },
 }
 CELERYD_CONCURRENCY = 1

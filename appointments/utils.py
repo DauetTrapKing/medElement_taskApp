@@ -2,7 +2,9 @@ from base64 import b64encode
 from django.core.exceptions import ObjectDoesNotExist
 from .models import Reviews, Statuses
 from  gevent import sleep 
+from appointments.openai.analysisData import analyze_transcription
 from django.utils import timezone
+import openai
 import os
 import logging
 import requests 
@@ -41,6 +43,202 @@ def get_headers(username, password):
 
 def make_url(base_url, endpoint):
     return f"{base_url}{endpoint}"
+
+
+def process_status_and_audio():
+    try:
+        logger.info("Starting process_status_and_audio task")
+        api_key = os.getenv("ACS_API_KEY")
+        status_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_status"
+        audio_url = f"https://back.crm.acsolutions.ai/api/v2/orders/public/{api_key}/get_calls"
+
+        # Получаем все записи из таблицы Status
+        all_statuses = Statuses.objects.all()
+        for status in all_statuses:
+            order_key = status.order_key
+            logger.info(f"Processing order_key: {order_key}")
+
+            # Проверяем, является ли текущий статус "scheduled"
+            if status.status == "scheduled":
+                logger.info(f"Order key {order_key} has status 'scheduled', proceeding with updates")
+
+                # Получаем новый статус и аудио
+                new_status_name, audio_link = fetch_status_and_audio(api_key, status_url, audio_url, order_key)
+
+                # Обновление статуса, если новый статус отличается от текущего
+                if new_status_name and status.status != new_status_name:
+                    logger.info(f"Updating status for order_key {order_key}")
+                    status.status = new_status_name
+                    status.save()
+
+                # Если аудио ссылка найдена, скачиваем аудио и обрабатываем
+                if audio_link:
+                    logger.info(f"Processing audio for order_key {order_key}")
+                    status.audio_link = audio_link
+                    status.save()
+
+                    # Приведение RECEPTION_CODE к строке и логирование
+                    reception_code = str(status.RECEPTION_CODE).strip()
+                    logger.info(f"Attempting to retrieve review with RECEPTION_CODE: '{reception_code}'")
+
+                    # Проверка, чтобы RECEPTION_CODE не было "Unknown" или пустым
+                    if reception_code and reception_code != "Unknown":
+                        try:
+                            review = Reviews.objects.get(RECEPTION_CODE=reception_code)
+                            logger.info(f"Review found for RECEPTION_CODE {reception_code}")
+
+                            # Обновляем аудио ссылку в Reviews
+                            review.audio_link = audio_link
+                            review.save()
+
+                            # Скачиваем аудиофайл по полученной ссылке
+                            save_path = f"/tmp/{order_key}.mp3"
+                            downloaded_audio = download_audio(audio_link, save_path)
+
+                            if downloaded_audio:
+                                transcription = transcribe_audio(downloaded_audio)
+                                if transcription:
+                                    logger.info(f"Transcription successful for order_key {order_key}")
+
+                                    # Выполняем анализ распознанного текста
+                                    knowledge_base = {...}  # Ваша база данных фраз робота
+                                    analysis_result = analyze_transcription(knowledge_base, transcription)
+
+                                    if analysis_result:
+                                        # Логирование анализа для проверки
+                                        logger.debug(f"Analysis result: {analysis_result}")
+
+                                        # Обновляем запись в таблице Reviews с результатами анализа
+                                        review.doctor_rating = analysis_result.get("doctor_rating")
+                                        review.doctor_feedback = analysis_result.get("doctor_feedback")
+                                        review.clinic_rating = analysis_result.get("clinic_rating")
+                                        review.clinic_feedback = analysis_result.get("clinic_feedback")
+                                        # Сохраняем изменения в базе данных
+                                        review.save()
+                                        logger.info(f"Review updated for RECEPTION_CODE {reception_code}")
+                                    else:
+                                        logger.warning(f"Analysis failed for transcription of order_key {order_key}")
+                                else:
+                                    logger.warning(f"Transcription failed for order_key {order_key}")
+                            else:
+                                logger.warning(f"Failed to download audio for order_key {order_key}")
+
+                        except Reviews.DoesNotExist:
+                            logger.error(f"Review not found for RECEPTION_CODE {reception_code}")
+                            continue
+                    else:
+                        logger.warning(f"Invalid RECEPTION_CODE: '{reception_code}' for order_key {order_key}")
+
+            else:
+                logger.info(f"Skipping order_key {order_key}, status is not 'scheduled'")
+
+    except Exception as e:
+        logger.error(f"Error in process_status_and_audio: {e}")
+        return {"error": str(e)}
+
+
+def fetch_status_and_audio(api_key, status_url, audio_url, order_key): 
+    try:
+        # Запрос на получение статуса
+        logger.info(f"Fetching status for order_key: {order_key}")
+        status_response = requests.get(status_url, params={"keys": order_key})
+
+        # Проверка успешности запроса
+        if status_response.status_code != 200:
+            logger.error(f"Failed to fetch status for order_key {order_key}. Status code: {status_response.status_code}")
+            return None, None
+
+        try:
+            response_data = status_response.json()
+        except ValueError as e:
+            logger.error(f"Failed to parse JSON for order_key {order_key}: {e}")
+            return None, None
+
+        # Проверяем, что это словарь и он содержит нужный ключ
+        if isinstance(response_data, dict) and order_key in response_data:
+            status_info = response_data[order_key].get("status_group_8", {})
+            if isinstance(status_info, dict):
+                new_status_name = status_info.get("name")
+                logger.info(f"Status retrieved for order_key {order_key}: {new_status_name}")
+            else:
+                logger.warning(f"No 'status_group_8' data or invalid format for order_key {order_key}")
+                new_status_name = None
+        else:
+            logger.warning(f"No valid status data for order_key {order_key}: {response_data}")
+            new_status_name = None
+
+        # Запрос на получение аудиозаписей
+        audio_response = requests.get(audio_url, params={"keys": order_key})
+
+        # Проверка успешности запроса
+        if audio_response.status_code != 200:
+            logger.error(f"Failed to fetch audio for order_key {order_key}. Status code: {audio_response.status_code}")
+            return new_status_name, None
+
+        try:
+            audio_data = audio_response.json()
+        except ValueError as e:
+            logger.error(f"Failed to parse audio JSON for order_key {order_key}: {e}")
+            return new_status_name, None
+
+        # Проверяем, что аудиоданные — это список
+        if isinstance(audio_data, list) and len(audio_data) > 0:
+            last_audio_entry = audio_data[-1]
+            if isinstance(last_audio_entry, dict) and last_audio_entry.get("order_key") == order_key:
+                audio_link = last_audio_entry.get("link")
+                if audio_link and audio_link.startswith("http"):
+                    logger.info(f"Audio link retrieved for order_key {order_key}: {audio_link}")
+                    return new_status_name, audio_link
+                else:
+                    logger.warning(f"Invalid audio link for order_key {order_key}: {audio_link}")
+                    return new_status_name, None
+        else:
+            logger.warning(f"No audio data found or invalid format for order_key {order_key}: {audio_data}")
+
+        return new_status_name, None
+
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Network error while fetching status or audio for order_key {order_key}: {req_err}")
+    except KeyError as key_err:
+        logger.error(f"Missing expected data in API response for order_key {order_key}: {key_err}")
+    except Exception as e:
+        logger.error(f"Unexpected error fetching status or audio for order_key {order_key}: {e}")
+
+    return None, None
+
+
+def download_audio(audio_url, save_path):
+    try:
+        logger.info(f"Downloading audio from {audio_url}")
+        response = requests.get(audio_url)
+        if response.status_code == 200:
+            with open(save_path, 'wb') as audio_file:
+                audio_file.write(response.content)
+            logger.info(f"Audio successfully downloaded and saved to {save_path}")
+            return save_path
+        else:
+            logger.error(f"Failed to download audio. Status code: {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error downloading audio from {audio_url}: {e}")
+        return None
+
+
+def transcribe_audio(audio_file_path):
+    try:
+        logger.info(f"Starting audio transcription for file: {audio_file_path}")
+        with open(audio_file_path, 'rb') as audio_file:
+            response = openai.Audio.transcribe(
+                model="whisper-1",
+                file=audio_file
+            )
+        transcription_text = response['text']
+        logger.info(f"Transcription completed for file: {audio_file_path}")
+        print(transcription_text)
+        return transcription_text
+    except Exception as e:
+        logger.error(f"Error during transcription for file {audio_file_path}: {e}")
+        return None
 
 
 def send_to_telegram(reception_code):

@@ -115,6 +115,8 @@ def find_appointments(username, password, address):
 
     logger.info(f"Found {len(data)} appointments for address: {address}")
     return data
+
+
 def get_doctor_info(patient_code, two_hours_ago, now, username, password):
     max_attempts = 5
     attempts = 0
@@ -187,7 +189,8 @@ def get_patient_info(patient_code, username, password):
             # Получаем первый номер телефона и очищаем его от нецифровых символов
             phone = patient_data.get("PATIENT_PHONE_1")
             patient_phone = "".join(filter(str.isdigit, phone)) if phone else None
-
+            if patient_phone:
+                patient_phone = f"+7{patient_phone}"
             # Формируем результативный словарь
             patient_info = {
                 "NAME": patient_data.get("NAME"),
