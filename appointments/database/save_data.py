@@ -16,7 +16,7 @@ redis_client = redis.Redis(host="localhost", port=6379, db=0)
 def save_appointments_to_db(detailed_appointments):
     """Saving data to database"""
     try:
-        two_weeks_ago = timezone.now() - timedelta(weeks=2)
+        one_day_ago = timezone.now() - timedelta(hours=24)
         for appointment in detailed_appointments:
             appointment_info = appointment["appointment"]
             doctor_info = appointment["doctor_info"]
@@ -35,10 +35,6 @@ def save_appointments_to_db(detailed_appointments):
             # Получение имени доктора
             doctor_name = doctor_info.get("SPECIALIST_FULLNAME", "Unknown Doctor")
             
-            # Проверка на наличие слова "кабинет" в имени доктора
-            if ("кабинет" or "лаборатория" or "callcenter") in doctor_name.lower():
-                logger.warning(f"Appointment with RECEPTION_CODE {reception_code} skipped due to 'кабинет' in doctor's name.")
-                continue
             # Проверка на дублирование по call_date за последние две недели
             existing_status = Statuses.objects.filter(RECEPTION_CODE=reception_code, call_date__gte=two_weeks_ago).first()
             if existing_status:

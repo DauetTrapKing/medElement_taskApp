@@ -209,8 +209,15 @@ def fetch_status_and_audio(api_key, status_url, audio_url, order_key):
 
 def download_audio(audio_url, save_path):
     try:
+        # Проверка и создание директории, если она не существует
+        directory = os.path.dirname(save_path)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            logger.info(f"Created directory: {directory}")
+
         logger.info(f"Downloading audio from {audio_url}")
         response = requests.get(audio_url)
+        
         if response.status_code == 200:
             with open(save_path, 'wb') as audio_file:
                 audio_file.write(response.content)
@@ -222,7 +229,6 @@ def download_audio(audio_url, save_path):
     except Exception as e:
         logger.error(f"Error downloading audio from {audio_url}: {e}")
         return None
-
 
 def transcribe_audio(audio_file_path):
     try:
@@ -302,6 +308,20 @@ def send_to_telegram(reception_code):
         logger.error(f"No review found for RECEPTION_CODE: {reception_code}")
     except Exception as e:
         logger.error(f"Error while sending message to Telegram: {str(e)}")
+
+
+def process_excel_data(df):
+    for _, row in df.iterrows():
+        order_key = row['Order key']
+        result = row['Result']
+        dialog_text = row['Dialog text']
+        # Проверяем, есть ли запись в базе данных
+        if not YourModel.objects.filter(order_key=order_key).exists() and result != "в процессе":
+            # Отправляем диалог в GPT для анализа
+            gpt_response = send_to_gpt(dialog_text)
+
+            # Сохраняем результат в базу данных
+            YourModel.objects.create(order_key=order_key, gpt_response=gpt_response)
 
 
 def send_appointments_to_api(detailed_appointments):

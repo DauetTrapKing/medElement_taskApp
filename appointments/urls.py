@@ -1,6 +1,6 @@
 from django.urls import path
-from .views import process_conversation
+from .views import upload_excel_view
 
 urlpatterns = [
-    path("proccess_conversation/",process_conversation , name='receive_comment'),
+    path("upload_excel/",upload_excel_view , name='upload_excel'),
 ]

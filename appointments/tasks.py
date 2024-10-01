@@ -21,7 +21,7 @@ BASE_URL = "https://api.medelement.com"
 def run_task_on_start(sender, instance, **kwargs):
     logger.debug("Starting tasks immediately after worker setup...")
     test_request_task.apply_async()
-    update_status_and_fetch_audio_task.apply_async()
+    # update_status_and_fetch_audio_task.apply_async()
 
 
 @shared_task
@@ -77,17 +77,17 @@ def test_request_task():
         return {"error": str(e)}
 
 
-@shared_task
-def update_status_and_fetch_audio_task():
-    try:
-        process_status_and_audio()  # Вызов основной функции
-        logger.info("Статусы и аудио успешно обработаны.")
-        all_reviews = Reviews.objects.filter(doctor_rating__lt=2) | Reviews.objects.filter(clinic_rating__lt=2)
-        for review in all_reviews:
-            send_to_telegram(review.RECEPTION_CODE)
+# @shared_task
+# def update_status_and_fetch_audio_task():
+#     try:
+#         process_status_and_audio()  # Вызов основной функции
+#         logger.info("Статусы и аудио успешно обработаны.")
+#         all_reviews = Reviews.objects.filter(doctor_rating__lt=2) | Reviews.objects.filter(clinic_rating__lt=2)
+#         for review in all_reviews:
+#             send_to_telegram(review.RECEPTION_CODE)
 
-    except Exception as e:
-        logger.error(f"Ошибка в update_status_and_fetch_audio_task: {e}")
+#     except Exception as e:
+#         logger.error(f"Ошибка в update_status_and_fetch_audio_task: {e}")
 
 
 @shared_task
