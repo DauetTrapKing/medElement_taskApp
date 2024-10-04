@@ -23,4 +23,5 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("appointments/", include("appointments.urls")),
     path("upload_excel/",upload_excel_view , name='upload_excel'),
+    path('generate_monthly_report/', generate_monthly_report, name='generate_monthly_report'),
 ]
