@@ -18,9 +18,9 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from appointments import views as appointments_view
-
+from appointments.views import upload_excel_view
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("appointments/", include("appointments.urls")),
-    path("proccess_conversation/", appointments_view.process_conversation, name='receive_comment'),
+    path("upload_excel/",upload_excel_view , name='upload_excel'),
 ]
